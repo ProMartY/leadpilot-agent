@@ -1,23 +1,39 @@
 # ruff: noqa
 
+import asyncio
 import os
+import time
 import uuid
+from collections import defaultdict, deque
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
 
-# ---------------------------------------------------------
-# Environment
-# ---------------------------------------------------------
+# =========================================================
+# CONFIG
+# =========================================================
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT_DIR / ".env"
 
+APP_NAME = "leadpilot_web_demo"
+
+# Public demo protection
+RATE_LIMIT_MAX_REQUESTS = 5
+RATE_LIMIT_WINDOW_SECONDS = 10 * 60
+MAX_MESSAGE_CHARS = 2000
+
+
+# =========================================================
+# LOCAL ENV LOADER
+# Cloud Run receives GEMINI_API_KEY from Secret Manager.
+# This section is only for local development.
+# =========================================================
 
 def load_local_env():
     if not ENV_FILE.exists():
@@ -41,12 +57,13 @@ def load_local_env():
 load_local_env()
 
 
-# Import after env loading.
+# Import after environment is available
 from app.agent import root_agent, db
 
 
-APP_NAME = "leadpilot_web_demo"
-
+# =========================================================
+# ADK
+# =========================================================
 
 runner = InMemoryRunner(
     app_name=APP_NAME,
@@ -56,6 +73,7 @@ runner = InMemoryRunner(
 
 web_app = FastAPI(
     title="LeadPilot AI Sales Operator",
+    version="1.0.0-demo",
 )
 
 
@@ -63,9 +81,67 @@ class LeadRequest(BaseModel):
     message: str
 
 
-# ---------------------------------------------------------
-# Firestore helpers
-# ---------------------------------------------------------
+# =========================================================
+# RATE LIMIT
+# 5 AI executions / 10 minutes / IP
+# =========================================================
+
+_rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+_rate_lock = asyncio.Lock()
+
+
+def get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+
+    if request.client:
+        return request.client.host
+
+    return "unknown"
+
+
+async def enforce_rate_limit(client_ip: str):
+    now = time.monotonic()
+    cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+
+    async with _rate_lock:
+        bucket = _rate_buckets[client_ip]
+
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+
+        if len(bucket) >= RATE_LIMIT_MAX_REQUESTS:
+            oldest_request = bucket[0]
+
+            retry_after = max(
+                1,
+                int(
+                    RATE_LIMIT_WINDOW_SECONDS
+                    - (now - oldest_request)
+                ),
+            )
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Demo limit reached. "
+                    "Maximum 5 AI workflows are allowed "
+                    "per 10 minutes from one IP address."
+                ),
+                headers={
+                    "Retry-After": str(retry_after),
+                },
+            )
+
+        bucket.append(now)
+
+
+# =========================================================
+# FIRESTORE HELPERS
+# Used to verify what the agent ACTUALLY executed.
+# =========================================================
 
 def collection_ids(collection_name: str) -> set[str]:
     return {
@@ -78,7 +154,9 @@ def snapshot_database() -> dict[str, set[str]]:
     return {
         "leads": collection_ids("leads"),
         "followups": collection_ids("followups"),
-        "manager_notifications": collection_ids("manager_notifications"),
+        "manager_notifications": collection_ids(
+            "manager_notifications"
+        ),
     }
 
 
@@ -111,7 +189,10 @@ def newest_document(documents):
         except Exception:
             return 0
 
-    return max(documents, key=created_at)
+    return max(
+        documents,
+        key=created_at,
+    )
 
 
 def format_delay_hours(created_at, due_at):
@@ -119,20 +200,24 @@ def format_delay_hours(created_at, due_at):
         return None
 
     try:
-        seconds = (due_at - created_at).total_seconds()
+        seconds = (
+            due_at - created_at
+        ).total_seconds()
+
         hours = seconds / 3600
 
         if abs(hours - round(hours)) < 0.05:
             return str(int(round(hours)))
 
         return f"{hours:.1f}"
+
     except Exception:
         return None
 
 
-# ---------------------------------------------------------
-# Agent runner
-# ---------------------------------------------------------
+# =========================================================
+# AGENT EXECUTION
+# =========================================================
 
 async def run_leadpilot(message: str):
     before = snapshot_database()
@@ -171,7 +256,7 @@ async def run_leadpilot(message: str):
                 final_text = "\n".join(text_parts)
 
     # -----------------------------------------------------
-    # Detect what the agent actually created in Firestore
+    # Verify actual Firestore side effects
     # -----------------------------------------------------
 
     new_leads = new_documents(
@@ -193,22 +278,32 @@ async def run_leadpilot(message: str):
 
     lead_id = None
     lead_quality = "UNKNOWN"
-    lead_data = {}
 
     if lead_doc:
         lead_id = lead_doc.id
+
         lead_data = lead_doc.to_dict()
+
         lead_quality = str(
-            lead_data.get("lead_quality", "UNKNOWN")
+            lead_data.get(
+                "lead_quality",
+                "UNKNOWN",
+            )
         ).upper()
 
-    # Only show downstream actions linked to THIS lead.
+    # -----------------------------------------------------
+    # Find downstream actions linked to this exact lead
+    # -----------------------------------------------------
+
     followup_doc = None
 
     for doc in new_followups:
         data = doc.to_dict()
 
-        if lead_id and data.get("lead_id") == lead_id:
+        if (
+            lead_id
+            and data.get("lead_id") == lead_id
+        ):
             followup_doc = doc
             break
 
@@ -217,18 +312,29 @@ async def run_leadpilot(message: str):
     for doc in new_notifications:
         data = doc.to_dict()
 
-        if lead_id and data.get("lead_id") == lead_id:
+        if (
+            lead_id
+            and data.get("lead_id") == lead_id
+        ):
             notification_doc = doc
             break
 
     # -----------------------------------------------------
-    # Build action result
+    # CRM status
     # -----------------------------------------------------
 
     crm_action = {
-        "status": "completed" if lead_doc else "not_created",
+        "status": (
+            "completed"
+            if lead_doc
+            else "not_created"
+        ),
         "lead_id": lead_id,
     }
+
+    # -----------------------------------------------------
+    # Follow-up status
+    # -----------------------------------------------------
 
     if followup_doc:
         followup_data = followup_doc.to_dict()
@@ -242,7 +348,10 @@ async def run_leadpilot(message: str):
             "status": "completed",
             "followup_id": followup_doc.id,
             "delay_hours": delay_hours,
-            "action": followup_data.get("action", ""),
+            "action": followup_data.get(
+                "action",
+                "",
+            ),
         }
 
     else:
@@ -253,12 +362,20 @@ async def run_leadpilot(message: str):
             "action": "",
         }
 
+    # -----------------------------------------------------
+    # Manager escalation status
+    # -----------------------------------------------------
+
     if notification_doc:
-        notification_data = notification_doc.to_dict()
+        notification_data = (
+            notification_doc.to_dict()
+        )
 
         manager_action = {
             "status": "completed",
-            "notification_id": notification_doc.id,
+            "notification_id": (
+                notification_doc.id
+            ),
             "urgency": notification_data.get(
                 "urgency",
                 "normal",
@@ -289,9 +406,9 @@ async def run_leadpilot(message: str):
     }
 
 
-# ---------------------------------------------------------
-# Web UI
-# ---------------------------------------------------------
+# =========================================================
+# UI
+# =========================================================
 
 @web_app.get("/", response_class=HTMLResponse)
 async def home():
@@ -309,13 +426,17 @@ async def home():
     content="width=device-width, initial-scale=1.0"
 >
 
-<title>LeadPilot — AI Sales Operator</title>
+<title>LeadPilot — Autonomous AI Sales Operator</title>
 
 
 <style>
 
 * {
     box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
 }
 
 body {
@@ -332,16 +453,16 @@ body {
 
     background:
         radial-gradient(
-            circle at top left,
-            #172554 0%,
-            transparent 34%
+            circle at 12% 10%,
+            rgba(37, 99, 235, .24),
+            transparent 32%
         ),
         radial-gradient(
-            circle at bottom right,
-            #064e3b 0%,
-            transparent 31%
+            circle at 88% 88%,
+            rgba(5, 150, 105, .22),
+            transparent 30%
         ),
-        #070b14;
+        #060a12;
 
     color: #f8fafc;
 
@@ -350,16 +471,25 @@ body {
 
 
 .shell {
-    width: min(1220px, calc(100% - 40px));
+    width: min(
+        1240px,
+        calc(100% - 40px)
+    );
+
     margin: 0 auto;
 
-    padding: 34px 0 58px;
+    padding:
+        34px
+        0
+        58px;
 }
 
 
 .topbar {
     display: flex;
+
     align-items: center;
+
     justify-content: space-between;
 
     margin-bottom: 35px;
@@ -368,21 +498,26 @@ body {
 
 .brand {
     display: flex;
+
     align-items: center;
+
     gap: 12px;
 }
 
 
 .logo {
-    width: 43px;
-    height: 43px;
+    width: 44px;
+
+    height: 44px;
 
     display: grid;
+
     place-items: center;
 
     border-radius: 13px;
 
-    font-weight: 800;
+    font-weight: 850;
+
     font-size: 20px;
 
     background:
@@ -393,14 +528,15 @@ body {
         );
 
     box-shadow:
-        0 10px 40px
-        rgba(37, 99, 235, .25);
+        0 12px 42px
+        rgba(37, 99, 235, .28);
 }
 
 
 .brand-title {
     font-size: 20px;
-    font-weight: 760;
+
+    font-weight: 780;
 }
 
 
@@ -408,30 +544,55 @@ body {
     color: #94a3b8;
 
     font-size: 13px;
+
     margin-top: 2px;
 }
 
 
-.online {
+.status-area {
+    display: flex;
+
+    align-items: center;
+
+    gap: 8px;
+
+    flex-wrap: wrap;
+}
+
+
+.pill {
+    padding:
+        8px
+        12px;
+
+    border-radius: 999px;
+
+    font-size: 12px;
+
     border:
         1px solid
+        rgba(100, 116, 139, .25);
+
+    background:
+        rgba(15, 23, 42, .72);
+
+    color: #94a3b8;
+}
+
+
+.online {
+    border-color:
         rgba(52, 211, 153, .35);
 
     background:
         rgba(16, 185, 129, .08);
 
     color: #6ee7b7;
-
-    padding: 8px 12px;
-
-    border-radius: 999px;
-
-    font-size: 13px;
 }
 
 
 .hero {
-    margin-bottom: 27px;
+    margin-bottom: 28px;
 }
 
 
@@ -440,16 +601,16 @@ body {
         clamp(
             34px,
             5vw,
-            58px
+            60px
         );
 
     line-height: 1.02;
 
-    letter-spacing: -2px;
+    letter-spacing: -2.1px;
 
     margin: 0;
 
-    max-width: 850px;
+    max-width: 880px;
 }
 
 
@@ -470,9 +631,9 @@ body {
 .hero p {
     color: #94a3b8;
 
-    max-width: 760px;
+    max-width: 790px;
 
-    line-height: 1.6;
+    line-height: 1.65;
 
     margin-top: 18px;
 
@@ -482,6 +643,7 @@ body {
 
 .flow {
     display: flex;
+
     flex-wrap: wrap;
 
     gap: 8px;
@@ -491,14 +653,18 @@ body {
 
 
 .flow span {
-    border: 1px solid #263249;
+    border:
+        1px solid
+        #263249;
 
     background:
         rgba(15, 23, 42, .72);
 
     color: #cbd5e1;
 
-    padding: 7px 11px;
+    padding:
+        7px
+        11px;
 
     border-radius: 9px;
 
@@ -519,7 +685,7 @@ body {
 
 .card {
     background:
-        rgba(12, 18, 32, .9);
+        rgba(12, 18, 32, .91);
 
     border:
         1px solid
@@ -531,9 +697,10 @@ body {
 
     box-shadow:
         0 20px 70px
-        rgba(0, 0, 0, .22);
+        rgba(0, 0, 0, .24);
 
-    backdrop-filter: blur(12px);
+    backdrop-filter:
+        blur(12px);
 }
 
 
@@ -584,6 +751,19 @@ textarea:focus {
 }
 
 
+.character-row {
+    display: flex;
+
+    justify-content: space-between;
+
+    margin-top: 7px;
+
+    font-size: 11px;
+
+    color: #64748b;
+}
+
+
 button {
     border: none;
 
@@ -591,7 +771,8 @@ button {
 
     transition:
         transform .15s ease,
-        opacity .15s ease;
+        opacity .15s ease,
+        border-color .15s ease;
 }
 
 
@@ -602,11 +783,13 @@ button {
 
     border-radius: 13px;
 
-    padding: 14px 18px;
+    padding:
+        14px
+        18px;
 
     color: white;
 
-    font-weight: 700;
+    font-weight: 750;
 
     font-size: 15px;
 
@@ -616,11 +799,16 @@ button {
             #2563eb,
             #059669
         );
+
+    box-shadow:
+        0 10px 30px
+        rgba(37, 99, 235, .12);
 }
 
 
 .primary:hover {
-    transform: translateY(-1px);
+    transform:
+        translateY(-1px);
 }
 
 
@@ -657,7 +845,14 @@ button {
 
     font-size: 12px;
 
-    padding: 8px 10px;
+    padding:
+        8px
+        10px;
+}
+
+
+.example:hover {
+    border-color: #475569;
 }
 
 
@@ -677,7 +872,7 @@ button {
 .result-title {
     font-size: 17px;
 
-    font-weight: 750;
+    font-weight: 760;
 }
 
 
@@ -695,13 +890,15 @@ button {
 
     margin-bottom: 13px;
 
-    padding: 7px 11px;
+    padding:
+        7px
+        11px;
 
     border-radius: 999px;
 
     font-size: 12px;
 
-    font-weight: 800;
+    font-weight: 850;
 
     letter-spacing: .8px;
 }
@@ -787,7 +984,7 @@ button {
     margin-top: 22px;
 
     background:
-        rgba(12, 18, 32, .9);
+        rgba(12, 18, 32, .91);
 
     border:
         1px solid
@@ -798,6 +995,10 @@ button {
     padding: 22px;
 
     display: none;
+
+    box-shadow:
+        0 20px 70px
+        rgba(0, 0, 0, .18);
 }
 
 
@@ -850,7 +1051,7 @@ button {
 
     padding: 16px;
 
-    min-height: 135px;
+    min-height: 142px;
 }
 
 
@@ -868,7 +1069,7 @@ button {
 
 
 .action-name {
-    font-weight: 750;
+    font-weight: 760;
 
     font-size: 14px;
 }
@@ -877,7 +1078,7 @@ button {
 .action-state {
     font-size: 12px;
 
-    font-weight: 750;
+    font-weight: 780;
 }
 
 
@@ -904,6 +1105,34 @@ button {
     line-height: 1.55;
 
     word-break: break-word;
+
+    white-space: pre-wrap;
+}
+
+
+.protection {
+    display: flex;
+
+    align-items: center;
+
+    gap: 7px;
+
+    margin-top: 14px;
+
+    color: #64748b;
+
+    font-size: 11px;
+}
+
+
+.protection-dot {
+    width: 6px;
+
+    height: 6px;
+
+    border-radius: 50%;
+
+    background: #10b981;
 }
 
 
@@ -971,8 +1200,16 @@ button {
         </div>
 
 
-        <div class="online">
-            ● Agent online
+        <div class="status-area">
+
+            <div class="pill">
+                Protected demo
+            </div>
+
+            <div class="pill online">
+                ● Agent online
+            </div>
+
         </div>
 
     </div>
@@ -1032,8 +1269,23 @@ button {
 
             <textarea
                 id="message"
+                maxlength="2000"
+                oninput="updateCharacterCount()"
                 placeholder="Example: Хочу тепловий насос для утепленого будинку 160 м² у Нетішині..."
             ></textarea>
+
+
+            <div class="character-row">
+
+                <span>
+                    Customer message
+                </span>
+
+                <span id="characterCount">
+                    0 / 2000
+                </span>
+
+            </div>
 
 
             <button
@@ -1067,6 +1319,17 @@ button {
                 >
                     COLD example
                 </button>
+
+            </div>
+
+
+            <div class="protection">
+
+                <div class="protection-dot"></div>
+
+                <span>
+                    Demo protected by request and infrastructure limits
+                </span>
 
             </div>
 
@@ -1150,10 +1413,10 @@ Firestore workflow automatically.
                     <div
                         id="crmState"
                         class="action-state"
-                    >
-                    </div>
+                    ></div>
 
                 </div>
+
 
                 <div
                     id="crmDetail"
@@ -1174,10 +1437,10 @@ Firestore workflow automatically.
                     <div
                         id="followupState"
                         class="action-state"
-                    >
-                    </div>
+                    ></div>
 
                 </div>
+
 
                 <div
                     id="followupDetail"
@@ -1198,10 +1461,10 @@ Firestore workflow automatically.
                     <div
                         id="managerState"
                         class="action-state"
-                    >
-                    </div>
+                    ></div>
 
                 </div>
+
 
                 <div
                     id="managerDetail"
@@ -1228,35 +1491,66 @@ Firestore workflow automatically.
 <script>
 
 
+function updateCharacterCount() {
+
+    const message =
+        document.getElementById(
+            "message"
+        );
+
+    document.getElementById(
+        "characterCount"
+    ).textContent =
+        message.value.length +
+        " / 2000";
+}
+
+
+function fillExample(text) {
+
+    document.getElementById(
+        "message"
+    ).value = text;
+
+    updateCharacterCount();
+}
+
+
 function setHot() {
 
-    document.getElementById("message").value =
+    fillExample(
         "Хочу тепловий насос для утепленого будинку 160 м² у Нетішині. " +
         "Є водяна тепла підлога і 3 фази. " +
         "Хочу купити найближчими днями, " +
-        "передзвоніть мені для підбору.";
+        "передзвоніть мені для підбору."
+    );
 }
 
 
 function setWarm() {
 
-    document.getElementById("message").value =
+    fillExample(
         "Цікавить тепловий насос для будинку приблизно 140 м². " +
         "Будинок ще будується, систему опалення остаточно не вирішив. " +
-        "Хотів би зрозуміти що потрібно і які наступні кроки.";
+        "Хотів би зрозуміти що потрібно і які наступні кроки."
+    );
 }
 
 
 function setCold() {
 
-    document.getElementById("message").value =
+    fillExample(
         "Просто цікавлюсь тепловими насосами. " +
         "Будинок поки не будую і купувати найближчим часом нічого не планую. " +
-        "Хотів лише приблизно зрозуміти як це працює.";
+        "Хотів лише приблизно зрозуміти як це працює."
+    );
 }
 
 
-function setState(element, state) {
+function setState(
+    element,
+    state
+) {
 
     element.classList.remove(
         "completed",
@@ -1266,7 +1560,8 @@ function setState(element, state) {
 
     if (state === "completed") {
 
-        element.textContent = "✓ COMPLETED";
+        element.textContent =
+            "✓ COMPLETED";
 
         element.classList.add(
             "completed"
@@ -1274,7 +1569,8 @@ function setState(element, state) {
 
     } else if (state === "skipped") {
 
-        element.textContent = "— SKIPPED";
+        element.textContent =
+            "— SKIPPED";
 
         element.classList.add(
             "skipped"
@@ -1282,7 +1578,8 @@ function setState(element, state) {
 
     } else {
 
-        element.textContent = "✕ NOT CREATED";
+        element.textContent =
+            "✕ NOT CREATED";
 
         element.classList.add(
             "failed"
@@ -1302,19 +1599,26 @@ function renderQuality(quality) {
         (quality || "UNKNOWN")
         .toUpperCase();
 
-    badge.className = "quality";
+    badge.className =
+        "quality";
 
     if (value === "HOT") {
 
-        badge.classList.add("hot");
+        badge.classList.add(
+            "hot"
+        );
 
     } else if (value === "WARM") {
 
-        badge.classList.add("warm");
+        badge.classList.add(
+            "warm"
+        );
 
     } else if (value === "COLD") {
 
-        badge.classList.add("cold");
+        badge.classList.add(
+            "cold"
+        );
     }
 
     badge.textContent = value;
@@ -1353,8 +1657,8 @@ function renderActions(actions) {
     if (actions.crm.lead_id) {
 
         crmDetail.textContent =
-            "Lead saved to Firestore\\n" +
-            "ID: " +
+            "Lead saved to Firestore\\n\\n" +
+            "Lead ID\\n" +
             actions.crm.lead_id;
 
     } else {
@@ -1380,6 +1684,7 @@ function renderActions(actions) {
         followupState,
         actions.followup.status
     );
+
 
     if (
         actions.followup.status
@@ -1408,7 +1713,8 @@ function renderActions(actions) {
                 actions.followup.action;
         }
 
-        followupDetail.textContent = text;
+        followupDetail.textContent =
+            text;
 
     } else {
 
@@ -1417,7 +1723,7 @@ function renderActions(actions) {
     }
 
 
-    // Manager
+    // Human escalation
 
     const managerState =
         document.getElementById(
@@ -1434,13 +1740,15 @@ function renderActions(actions) {
         actions.manager.status
     );
 
+
     if (
         actions.manager.status
         === "completed"
     ) {
 
         managerDetail.textContent =
-            "Manager notified\\nUrgency: " +
+            "Manager notified\\n\\n" +
+            "Urgency: " +
             (
                 actions.manager.urgency
                 || "normal"
@@ -1458,7 +1766,9 @@ async function analyzeLead() {
 
     const message =
         document
-        .getElementById("message")
+        .getElementById(
+            "message"
+        )
         .value
         .trim();
 
@@ -1482,6 +1792,15 @@ async function analyzeLead() {
     }
 
 
+    if (message.length > 2000) {
+
+        result.textContent =
+            "Customer message is too long.";
+
+        return;
+    }
+
+
     button.disabled = true;
 
     button.textContent =
@@ -1489,14 +1808,18 @@ async function analyzeLead() {
 
 
     document
-        .getElementById("workflow")
+        .getElementById(
+            "workflow"
+        )
         .classList
-        .remove("visible");
+        .remove(
+            "visible"
+        );
 
 
     result.textContent =
         "Understanding customer intent...\\n" +
-        "Qualifying lead...\\n" +
+        "Qualifying buying readiness...\\n" +
         "Executing CRM workflow...\\n" +
         "Applying business guardrails...";
 
@@ -1554,12 +1877,13 @@ async function analyzeLead() {
     } catch (error) {
 
         result.textContent =
-            "ERROR\\n\\n" +
+            "LeadPilot request failed.\\n\\n" +
             error.message;
 
     } finally {
 
-        button.disabled = false;
+        button.disabled =
+            false;
 
         button.textContent =
             "Analyze & execute workflow";
@@ -1576,14 +1900,24 @@ async function analyzeLead() {
 """
 
 
-# ---------------------------------------------------------
+# =========================================================
 # API
-# ---------------------------------------------------------
+# =========================================================
 
 @web_app.post("/analyze")
-async def analyze_lead(request: LeadRequest):
+async def analyze_lead(
+    request: Request,
+    payload: LeadRequest,
+):
+    client_ip = get_client_ip(
+        request
+    )
 
-    message = request.message.strip()
+    await enforce_rate_limit(
+        client_ip
+    )
+
+    message = payload.message.strip()
 
     if not message:
         raise HTTPException(
@@ -1591,14 +1925,24 @@ async def analyze_lead(request: LeadRequest):
             detail="Customer message is required.",
         )
 
-    try:
+    if len(message) > MAX_MESSAGE_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Customer message exceeds "
+                "the 2000 character demo limit."
+            ),
+        )
 
+    try:
         return await run_leadpilot(
             message
         )
 
-    except Exception as exc:
+    except HTTPException:
+        raise
 
+    except Exception as exc:
         print(
             "LeadPilot execution error:",
             type(exc).__name__,
@@ -1610,18 +1954,22 @@ async def analyze_lead(request: LeadRequest):
             detail=(
                 "LeadPilot could not complete "
                 "the workflow. "
-                "Check the server console."
+                "Check the server logs."
             ),
         )
 
 
 @web_app.get("/health")
 async def health():
-
     return {
         "status": "ok",
         "agent": "leadpilot_sales_operator",
         "database": "firestore",
+        "demo_protection": {
+            "requests": RATE_LIMIT_MAX_REQUESTS,
+            "window_seconds": RATE_LIMIT_WINDOW_SECONDS,
+            "max_message_chars": MAX_MESSAGE_CHARS,
+        },
     }
 
 
