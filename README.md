@@ -1,419 +1,149 @@
 # LeadPilot
 
-### Autonomous AI Sales Operator for service businesses
+**LeadPilot is an autonomous AI sales operator for service businesses.**  
+It takes an incoming customer message, qualifies the lead, writes it to CRM, schedules the next follow-up, and escalates to a human only when the opportunity needs attention.
 
-LeadPilot turns incoming customer messages into concrete business actions.
-
-Instead of only generating a chatbot response, LeadPilot autonomously:
-
-- understands customer intent;
-- extracts known and missing information;
-- qualifies buying readiness;
-- saves the lead to CRM;
-- schedules the appropriate follow-up;
-- escalates high-priority opportunities to a human manager;
-- applies deterministic business guardrails before taking actions.
-
-**Live demo:**  
-https://leadpilot-agent-590163484801.europe-central2.run.app
+**Live demo:** https://leadpilot-agent-590163484801.europe-central2.run.app
 
 ---
 
-## The problem
+## What it does
 
-Small service businesses lose revenue because incoming leads are handled inconsistently.
+A typical lead does not arrive as clean CRM data. It arrives as a message like:
 
-A customer may arrive from a website, advertisement, messenger, email, or lead form.
+> Хочу тепловий насос для утепленого будинку 160 м² у Нетішині. Є водяна тепла підлога і 3 фази. Хочу купити найближчими днями, передзвоніть мені для підбору.
 
-The business then has to manually:
+LeadPilot turns that message into:
 
-1. understand what the customer wants;
-2. identify missing information;
-3. determine whether the lead is serious;
-4. enter the lead into a CRM;
-5. decide when to follow up;
-6. decide whether a salesperson needs to act immediately;
-7. write the customer response;
-8. remember to perform the next action.
+- the customer's need;
+- known and missing information;
+- a `HOT`, `WARM`, or `COLD` qualification;
+- the next sales action;
+- a customer reply;
+- an internal manager note;
+- a real Firestore CRM record;
+- a follow-up task when appropriate;
+- a manager escalation when appropriate.
 
-Traditional chatbots solve only a small part of this workflow.
-
-They talk.
-
-They do not reliably operate the sales process.
+The important part is that the agent does not only *describe* those actions. It executes them.
 
 ---
 
-# The solution
+## Demo behavior
 
-LeadPilot is an **AI Sales Operator**.
+| Lead | CRM | Follow-up | Human escalation |
+|---|---|---|---|
+| `HOT` | ✅ Saved | ✅ 1–4 hours | ✅ High priority |
+| `WARM` | ✅ Saved | ✅ Scheduled | — |
+| `COLD` | ✅ Saved | — | — |
 
-It combines Gemini reasoning with deterministic business rules and persistent CRM state.
-
-The core workflow is:
-
-```text
-Incoming customer message
-          ↓
-     Gemini reasoning
-          ↓
-Intent + facts + missing data
-          ↓
- HOT / WARM / COLD qualification
-          ↓
-     CRM persistence
-          ↓
- Business action decision
-       ↙          ↘
- Follow-up     Human escalation
-          ↓
-   Customer response
-```
-
-LeadPilot is designed to move a lead toward the next useful business state — not simply generate text.
+The web demo shows the resulting Firestore-backed actions after each run, including the real lead ID.
 
 ---
 
-# Autonomous workflow
+## How it works
 
-Every incoming lead passes through the same operating loop.
+1. A customer message is submitted to the FastAPI web app.
+2. A Google ADK agent uses Gemini to understand the request and extract useful facts.
+3. The agent qualifies the lead as `HOT`, `WARM`, or `COLD`.
+4. LeadPilot saves the structured lead to Firestore.
+5. Deterministic tool rules decide which actions are allowed.
+6. LeadPilot creates a follow-up and/or manager notification when required.
+7. The UI verifies the new Firestore records and shows what was actually executed.
 
-## 1. Understand
+```mermaid
+flowchart LR
+    A[Customer message] --> B[FastAPI / Cloud Run]
+    B --> C[Google ADK Agent]
+    C --> D[Gemini]
+    D --> E{HOT / WARM / COLD}
 
-LeadPilot identifies:
+    E --> F[Save lead]
+    F --> G[(Firestore)]
 
-- what the customer wants;
-- what information is already known;
-- what important information is still missing;
-- what action would move the sale forward.
+    E --> H[Create follow-up]
+    H --> G
 
-## 2. Qualify
+    E --> I[Notify manager]
+    I --> G
 
-LeadPilot assigns one of three buying-readiness states.
-
-### HOT
-
-The customer has a clear need and strong near-term buying intent.
-
-```text
-CRM SAVE          ✓
-FOLLOW-UP         ✓ 1–4 hours
-MANAGER ALERT     ✓ HIGH priority
-```
-
-### WARM
-
-The opportunity is real, but timing or important information is still unclear.
-
-```text
-CRM SAVE          ✓
-FOLLOW-UP         ✓
-MANAGER ALERT     — SKIPPED
-```
-
-### COLD
-
-The customer is primarily researching or explicitly has no near-term intention to buy.
-
-```text
-CRM SAVE          ✓
-FOLLOW-UP         — SKIPPED
-MANAGER ALERT     — SKIPPED
-```
-
-This prevents sales teams from wasting time treating every inquiry as equally urgent.
-
----
-
-# AI + deterministic guardrails
-
-Gemini handles semantic reasoning:
-
-- intent detection;
-- information extraction;
-- qualification;
-- natural language responses;
-- next-action reasoning.
-
-Python business logic enforces deterministic rules:
-
-```text
-HOT
-→ manager notification allowed
-→ follow-up constrained to 1–4 hours
-
-WARM
-→ follow-up allowed
-→ manager notification blocked
-
-COLD
-→ manager notification blocked
-→ automatic follow-up blocked
-```
-
-A model can request an invalid action, but the underlying tool rejects it.
-
----
-
-# No fabricated technical recommendations
-
-LeadPilot is explicitly prohibited from inventing:
-
-- equipment capacity;
-- technical compatibility;
-- pricing;
-- projected savings;
-- installation requirements;
-- customer details;
-- measurements that were not supplied.
-
-If an engineering calculation is required, LeadPilot requests the necessary information or escalates the task instead of guessing.
-
----
-
-# Real business actions
-
-After Gemini finishes reasoning, LeadPilot executes tools that create real documents in Google Cloud Firestore.
-
-The web application then verifies the resulting Firestore state and displays what was actually executed.
-
-Example HOT workflow:
-
-```text
-Lead quality
-HOT
-
-CRM
-✓ COMPLETED
-Lead ID: <real Firestore document ID>
-
-Follow-up
-✓ COMPLETED
-Scheduled in 2h
-
-Human escalation
-✓ COMPLETED
-Urgency: HIGH
-```
-
-The UI therefore shows **verified side effects**, not only the model's claimed actions.
-
----
-
-# CRM data model
-
-LeadPilot currently uses three Firestore collections.
-
-## `leads`
-
-```text
-name
-contact
-need
-missing_data
-lead_quality
-priority
-next_action
-customer_reply
-manager_note
-created_at
-source
-```
-
-## `followups`
-
-```text
-lead_id
-action
-status
-created_at
-due_at
-source
-```
-
-## `manager_notifications`
-
-```text
-lead_id
-message
-urgency
-status
-created_at
-source
-```
-
-All downstream actions reference the real Firestore `lead_id`.
-
----
-
-# Architecture
-
-```text
-Customer / Lead
-      ↓
-FastAPI Web Demo
-Google Cloud Run
-      ↓
-LeadPilot Agent
-Google ADK
-      ↓
-Gemini
-      ↓
-Deterministic tools
-      ↓
-Google Firestore CRM
-      ↓
-Follow-up / Human escalation
+    C --> J[Customer reply]
 ```
 
 ---
 
-# Google technologies used
+## Guardrails
 
-- **Gemini** — reasoning over incoming sales requests.
-- **Google Agent Development Kit** — agent runtime and tool calling.
-- **Google Cloud Firestore** — persistent CRM state.
-- **Google Cloud Run** — public application hosting.
-- **Google Secret Manager** — Gemini API credential storage.
-- **Google Cloud IAM** — dedicated runtime service account and scoped permissions.
+LeadPilot uses the model for language understanding and reasoning, but business-critical actions are constrained in code.
 
----
+Examples:
 
-# Demo
+- `HOT` leads may create a manager notification and a near-term follow-up.
+- `WARM` leads may create a follow-up but do not trigger an urgent manager alert.
+- `COLD` leads are saved to CRM without unnecessary escalation.
+- downstream actions must use the real Firestore lead ID returned by the CRM write.
+- the agent is instructed not to invent equipment capacity, pricing, compatibility, savings, or installation requirements when the available data is insufficient.
 
-Live application:
-
-https://leadpilot-agent-590163484801.europe-central2.run.app
-
-The demo includes HOT, WARM and COLD scenarios.
+For technical sales, this matters: if an engineering calculation is needed, LeadPilot asks for the missing data instead of guessing.
 
 ---
 
-# Why this is different from a chatbot
+## Stack
 
-A traditional chatbot performs:
+| Component | Used for |
+|---|---|
+| Gemini | intent understanding, extraction, qualification, response generation |
+| Google Agent Development Kit | agent runtime and tool calling |
+| Firestore | leads, follow-ups, manager notifications |
+| Cloud Run | public FastAPI application |
+| Secret Manager | Gemini API credential |
+| Google Cloud IAM | runtime service account and scoped access |
+| FastAPI | demo/API layer |
+
+---
+
+## Firestore
+
+The current prototype uses three collections:
 
 ```text
-message
-→ answer
+leads
+followups
+manager_notifications
 ```
 
-LeadPilot performs:
+A lead is written first. Follow-ups and manager notifications reference that lead through its actual Firestore document ID.
 
-```text
-message
-→ understand
-→ qualify
-→ persist
-→ decide
-→ act
-→ schedule
-→ escalate when necessary
-→ answer
-```
-
-The useful output is not only language. It is **business state change**.
+This makes it possible to verify that the visible workflow corresponds to persisted business state rather than a model-generated claim.
 
 ---
 
-# Human-in-the-loop by design
+## Public demo
 
-```text
-COLD lead
-→ handled without interrupting salesperson
+The public demo includes basic protection against accidental abuse:
 
-WARM lead
-→ stored and scheduled for follow-up
+- one Cloud Run instance maximum;
+- Cloud Run concurrency limited for the demo;
+- maximum customer message length of 2,000 characters;
+- per-IP workflow rate limiting;
+- Gemini API key stored in Secret Manager;
+- `.env` excluded from source deployment;
+- dedicated Cloud Run service account.
 
-HOT lead
-→ salesperson alerted immediately
-```
+Try the demo here:
 
----
-
-# Initial vertical
-
-The first implementation focuses on HVAC and heat-pump sales, where qualification requires both commercial and technical reasoning.
-
-The same architecture can later be configured for:
-
-```text
-HVAC
-Solar
-Plumbing
-Electrical services
-Roofing
-Home renovation
-Maintenance companies
-Equipment distributors
-B2B service providers
-```
+**https://leadpilot-agent-590163484801.europe-central2.run.app**
 
 ---
 
-# Product vision
+## Run locally
 
-A commercial LeadPilot platform can extend this architecture with:
+### Requirements
 
-```text
-Website lead forms
-Email ingestion
-Messenger integrations
-WhatsApp / Telegram
-Calendar booking
-Pipeline dashboard
-Multi-user CRM
-Automated follow-up sequences
-Quotation generation
-Product catalogs
-Knowledge retrieval
-Sales analytics
-Conversion tracking
-Multi-company accounts
-White-label agency mode
-Billing and subscriptions
-```
-
----
-
-# Business model
-
-Potential SaaS monetization can combine:
-
-- subscription;
-- usage-based pricing;
-- setup and onboarding;
-- agency / white-label plans.
-
----
-
-# Public demo protection
-
-Current safeguards include:
-
-```text
-Maximum Cloud Run instances: 1
-Cloud Run concurrency limit
-Maximum message size: 2000 characters
-Per-IP AI workflow rate limiting
-Gemini credential stored in Secret Manager
-.env excluded from source deployment
-Dedicated Cloud Run service account
-```
-
----
-
-# Local development
-
-Requirements:
-
-```text
-Python 3.12+
-uv
-Google Cloud authentication
-Gemini API access
-Firestore project
-```
+- Python 3.12+
+- `uv`
+- Gemini API access
+- Google Cloud project with Firestore
 
 Install dependencies:
 
@@ -421,19 +151,19 @@ Install dependencies:
 uv sync
 ```
 
-Create `.env`:
+Create a local `.env` file:
 
-```text
-GEMINI_API_KEY=<your Gemini API key>
+```env
+GEMINI_API_KEY=your_key_here
 ```
 
-Authenticate ADC:
+Authenticate Application Default Credentials:
 
 ```bash
 gcloud auth application-default login
 ```
 
-Run locally:
+Run the web demo:
 
 ```bash
 uv run uvicorn app.web_demo:app --host 127.0.0.1 --port 8081
@@ -447,7 +177,11 @@ http://127.0.0.1:8081
 
 ---
 
-# Deployment
+## Deploy to Cloud Run
+
+The repository includes a `Dockerfile` configured for the web demo.
+
+Example source deployment:
 
 ```bash
 gcloud run deploy leadpilot-agent \
@@ -456,53 +190,44 @@ gcloud run deploy leadpilot-agent \
   --allow-unauthenticated
 ```
 
-Production credentials should be supplied through Secret Manager rather than committed `.env` files.
+For the deployed demo, `GEMINI_API_KEY` is provided through Google Secret Manager rather than committed to the repository.
 
 ---
 
-# Current status
+## Repository
 
 ```text
-✓ Gemini agent reasoning
-✓ HOT / WARM / COLD qualification
-✓ Firestore CRM persistence
-✓ Real lead IDs
-✓ Automatic HOT follow-up
-✓ Automatic WARM follow-up
-✓ COLD follow-up guardrail
-✓ Human escalation for HOT opportunities
-✓ Deterministic business guardrails
-✓ Customer response generation
-✓ Internal manager notes
-✓ Public FastAPI interface
-✓ Cloud Run deployment
-✓ Secret Manager integration
-✓ Dedicated runtime service account
-✓ Public demo limits
-✓ Firestore-verified action UI
+app/
+├── agent.py          # agent instructions, tools and routing rules
+├── web_demo.py       # FastAPI demo and Firestore action verification
+├── fast_api_app.py
+└── app_utils/
+
+tests/
+Dockerfile
+pyproject.toml
+uv.lock
+.env.example
+.gcloudignore
+.gitignore
+README.md
 ```
 
 ---
 
-# Next steps
+## Current prototype
 
-1. persistent conversation state;
-2. real messaging integrations;
-3. scheduling and calendar integration;
-4. CRM dashboard;
-5. customizable business rules;
-6. knowledge and product catalogs;
-7. quotation workflows;
-8. analytics and conversion attribution;
-9. multi-tenant SaaS architecture;
-10. billing and commercial onboarding.
+Working today:
 
----
+- Gemini-powered lead analysis;
+- structured known/missing-data extraction;
+- `HOT` / `WARM` / `COLD` qualification;
+- Firestore CRM persistence;
+- follow-up creation;
+- guarded human escalation;
+- customer-facing reply;
+- manager note;
+- public Cloud Run deployment;
+- Firestore-verified action status in the web UI.
 
-# Core idea
-
-> AI should not only tell a salesperson what to do next.
-
-> It should safely execute the repetitive parts of the sales process and bring the human in when human judgment has the highest value.
-
-That is LeadPilot.
+The next product step is connecting the same workflow to real lead sources and manager channels instead of the demo input box.
