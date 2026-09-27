@@ -604,6 +604,8 @@ body {
 .lang-button { padding: 7px 10px; border-radius: 7px; background: transparent; color: #94a3b8; font-size: 12px; font-weight: 750; }
 .lang-button.active { color: white; background: #2563eb; }
 
+.demo-disclaimer { font-size: 12px; line-height: 1.5; color: #94a3b8; margin-top: 14px; }
+
 .hero {
     margin-bottom: 28px;
 }
@@ -1350,6 +1352,8 @@ button {
 
             </div>
 
+            <p class="demo-disclaimer" id="demoDisclaimer">Demo only: creates internal Firestore records. No technician is dispatched, appointment booked, customer message sent, or external manager alert delivered.</p>
+
         </section>
 
 
@@ -1571,6 +1575,9 @@ function setLocale(locale) {
         ? "Приклад: Потрібен тепловий насос для утепленого будинку..."
         : "Example: Our furnace stopped heating and we need service today...";
     document.getElementById("message").value = "";
+    document.getElementById("demoDisclaimer").textContent = isUkrainian
+        ? "Лише демо: створює внутрішні записи у Firestore. Немає реального виїзду майстра, бронювання, відправлення відповіді клієнту або сповіщення менеджеру поза Firestore."
+        : "Demo only: creates internal Firestore records. No technician is dispatched, appointment booked, customer message sent, or external manager alert delivered.";
     document.getElementById("result").textContent = isUkrainian
         ? "Надішліть заявку, щоб побачити кваліфікацію, наступну дію, відповідь клієнту та нотатку менеджеру."
         : "Submit a lead to see qualification, next action, customer reply, and manager note.";
@@ -1760,7 +1767,7 @@ function renderActions(actions) {
     ) {
 
         let text =
-            tr("Follow-up scheduled", "Повторний контакт заплановано");
+            tr("Follow-up task saved in Firestore", "Завдання повторного контакту збережено у Firestore");
 
         if (
             actions.followup.delay_hours
@@ -1815,7 +1822,7 @@ function renderActions(actions) {
     ) {
 
         managerDetail.textContent =
-            tr("Manager notified\\n\\nUrgency: ", "Менеджера повідомлено\\n\\nТерміновість: ") +
+            tr("Manager alert saved in Firestore\\n\\nUrgency: ", "Запис для менеджера збережено у Firestore\\n\\nТерміновість: ") +
             (
                 actions.manager.urgency
                 || "normal"
