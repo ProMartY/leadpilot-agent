@@ -1,0 +1,40 @@
+name: LeadPilot demo checks
+
+on:
+  pull_request:
+    paths:
+      - 'app/web_demo.py'
+      - 'app/agent.py'
+      - '.github/workflows/demo-checks.yml'
+  workflow_dispatch:
+
+jobs:
+  locale-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Python syntax
+        run: python -m py_compile app/web_demo.py app/agent.py
+      - name: Check bilingual demo contracts and JavaScript syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          web = Path("app/web_demo.py").read_text(encoding="utf-8")
+          agent = Path("app/agent.py").read_text(encoding="utf-8")
+          script = web.split("<script>", 1)[1].split("</script>", 1)[0]
+
+          assert 'locale: str = "en"' in web
+          assert 'locale: currentLocale' in script
+          assert 'const demoExamples' in script
+          assert "our furnace stopped heating" in script
+          assert "Нетішині" in script
+          assert 'DEMO_OUTPUT_LANGUAGE' in web
+          assert "treat the header as demo configuration" in agent
+          assert 'placeholder="Example: Our furnace stopped' in web
+          assert 'placeholder="Example: Хочу' not in web
+
+          Path("/tmp/leadpilot-demo.js").write_text(script, encoding="utf-8")
+          print("Bilingual source checks passed.")
+          PY
+          node --check /tmp/leadpilot-demo.js

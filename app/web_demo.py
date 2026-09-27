@@ -79,6 +79,7 @@ web_app = FastAPI(
 
 class LeadRequest(BaseModel):
     message: str
+    locale: str = "en"
 
 
 # =========================================================
@@ -219,7 +220,7 @@ def format_delay_hours(created_at, due_at):
 # AGENT EXECUTION
 # =========================================================
 
-async def run_leadpilot(message: str):
+async def run_leadpilot(message: str, locale: str = "en"):
     before = snapshot_database()
 
     user_id = f"demo-{uuid.uuid4().hex}"
@@ -233,7 +234,15 @@ async def run_leadpilot(message: str):
         role="user",
         parts=[
             types.Part.from_text(
-                text=message,
+                text=(
+                    "DEMO_OUTPUT_LANGUAGE: "
+                    + ("Ukrainian" if locale == "uk" else "English")
+                    + "\nUse this selected language throughout all final text, "
+                    "CRM text, customer reply, manager note, and follow-up action. "
+                    "Keep section labels and HOT/WARM/COLD tokens unchanged. "
+                    "Do not invent missing customer details.\n\n"
+                    "CUSTOMER_MESSAGE:\n" + message
+                ),
             )
         ],
     )
@@ -590,6 +599,10 @@ body {
     color: #6ee7b7;
 }
 
+
+.language-switch { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid #263249; border-radius: 10px; background: #080d18; }
+.lang-button { padding: 7px 10px; border-radius: 7px; background: transparent; color: #94a3b8; font-size: 12px; font-weight: 750; }
+.lang-button.active { color: white; background: #2563eb; }
 
 .hero {
     margin-bottom: 28px;
@@ -1201,6 +1214,10 @@ button {
 
 
         <div class="status-area">
+            <div class="language-switch" aria-label="Demo language">
+                <button type="button" class="lang-button active" data-lang="en" onclick="setLocale('en')">EN</button>
+                <button type="button" class="lang-button" data-lang="uk" onclick="setLocale('uk')">УКР</button>
+            </div>
 
             <div class="pill">
                 Protected demo
@@ -1217,7 +1234,7 @@ button {
 
     <section class="hero">
 
-        <h1>
+        <h1 id="heroTitle">
             Turn incoming leads into
             <span>next actions.</span>
         </h1>
@@ -1271,7 +1288,7 @@ button {
                 id="message"
                 maxlength="2000"
                 oninput="updateCharacterCount()"
-                placeholder="Example: Хочу тепловий насос для утепленого будинку 160 м² у Нетішині..."
+                placeholder="Example: Our furnace stopped heating and we need service today..."
             ></textarea>
 
 
@@ -1490,6 +1507,84 @@ Firestore workflow automatically.
 
 <script>
 
+let currentLocale = "en";
+
+const demoExamples = {
+    en: {
+        hot: "Hi, our furnace stopped heating this morning. We have a two-story home, approximately 1,900 sq ft. The thermostat is on, but no warm air is coming through the vents. We need a technician today. Please let us know your earliest availability and estimated diagnostic fee.",
+        warm: "We're comparing heat pump options for our 1,800 sq ft home. We may replace our current system later this year, but haven't chosen equipment or set a budget. Could you explain the assessment process?",
+        cold: "I'm just researching how heat pumps work. I don't have an installation planned and I'm not looking to buy anything in the near future."
+    },
+    uk: {
+        hot: "Хочу тепловий насос для утепленого будинку 160 м² у Нетішині. Є водяна тепла підлога і 3 фази. Хочу купити найближчими днями, передзвоніть мені для підбору.",
+        warm: "Цікавить тепловий насос для будинку приблизно 140 м². Будинок ще будується, систему опалення остаточно не вирішив. Хотів би зрозуміти, що потрібно і які наступні кроки.",
+        cold: "Просто цікавлюсь тепловими насосами. Будинок поки не будую і купувати найближчим часом нічого не планую. Хотів лише приблизно зрозуміти, як це працює."
+    }
+};
+
+const ukrainianCopy = {
+    "Autonomous AI Sales Operator": "Автономний AI-оператор продажів",
+    "Protected demo": "Захищене демо",
+    "● Agent online": "● Агент онлайн",
+    "Incoming lead": "Нова заявка",
+    "AI reasoning": "AI-аналіз",
+    "Follow-up": "Повторний контакт",
+    "Human escalation": "Передача менеджеру",
+    "Incoming customer message": "Повідомлення клієнта",
+    "Customer message": "Текст звернення",
+    "Analyze & execute workflow": "Проаналізувати та виконати дії",
+    "HOT example": "Приклад HOT",
+    "WARM example": "Приклад WARM",
+    "COLD example": "Приклад COLD",
+    "Demo protected by request and infrastructure limits": "Демо захищене обмеженнями запитів та інфраструктури",
+    "LeadPilot decision": "Рішення LeadPilot",
+    "Executed business actions": "Виконані бізнес-дії",
+    "verified from Firestore": "перевірено у Firestore"
+};
+
+const englishHero = document.getElementById("heroTitle").innerHTML;
+const englishDescription = document.querySelector(".hero p").textContent.trim();
+const languageNodes = Array.from(document.querySelectorAll(
+    ".brand-subtitle, .pill, .flow span, .card .label, .character-row span, " +
+    ".primary, .example, .protection span, .result-title, " +
+    ".workflow-heading strong, .workflow-heading span, .action-name"
+));
+languageNodes.forEach((element) => {
+    element.dataset.english = element.textContent.trim();
+});
+
+function setLocale(locale) {
+    if (document.getElementById("analyzeButton").disabled) return;
+    currentLocale = locale === "uk" ? "uk" : "en";
+    document.documentElement.lang = currentLocale;
+    const isUkrainian = currentLocale === "uk";
+    languageNodes.forEach((element) => {
+        const original = element.dataset.english;
+        element.textContent = isUkrainian ? (ukrainianCopy[original] || original) : original;
+    });
+    document.getElementById("heroTitle").innerHTML = isUkrainian
+        ? "Перетворюйте заявки на <span>наступні дії.</span>" : englishHero;
+    document.querySelector(".hero p").textContent = isUkrainian
+        ? "LeadPilot аналізує звернення, оцінює готовність до покупки, виконує дії в CRM, планує повторні контакти та передає менеджеру запити, яким потрібна увага людини."
+        : englishDescription;
+    document.getElementById("message").placeholder = isUkrainian
+        ? "Приклад: Потрібен тепловий насос для утепленого будинку..."
+        : "Example: Our furnace stopped heating and we need service today...";
+    document.getElementById("message").value = "";
+    document.getElementById("result").textContent = isUkrainian
+        ? "Надішліть заявку, щоб побачити кваліфікацію, наступну дію, відповідь клієнту та нотатку менеджеру."
+        : "Submit a lead to see qualification, next action, customer reply, and manager note.";
+    document.getElementById("qualityBadge").className = "quality";
+    document.getElementById("workflow").classList.remove("visible");
+    document.querySelectorAll(".lang-button").forEach((button) => {
+        const selected = button.dataset.lang === currentLocale;
+        button.classList.toggle("active", selected);
+        button.setAttribute("aria-pressed", String(selected));
+    });
+    updateCharacterCount();
+}
+
+function tr(en, uk) { return currentLocale === "uk" ? uk : en; }
 
 function updateCharacterCount() {
 
@@ -1516,35 +1611,9 @@ function fillExample(text) {
 }
 
 
-function setHot() {
-
-    fillExample(
-        "Хочу тепловий насос для утепленого будинку 160 м² у Нетішині. " +
-        "Є водяна тепла підлога і 3 фази. " +
-        "Хочу купити найближчими днями, " +
-        "передзвоніть мені для підбору."
-    );
-}
-
-
-function setWarm() {
-
-    fillExample(
-        "Цікавить тепловий насос для будинку приблизно 140 м². " +
-        "Будинок ще будується, систему опалення остаточно не вирішив. " +
-        "Хотів би зрозуміти що потрібно і які наступні кроки."
-    );
-}
-
-
-function setCold() {
-
-    fillExample(
-        "Просто цікавлюсь тепловими насосами. " +
-        "Будинок поки не будую і купувати найближчим часом нічого не планую. " +
-        "Хотів лише приблизно зрозуміти як це працює."
-    );
-}
+function setHot() { fillExample(demoExamples[currentLocale].hot); }
+function setWarm() { fillExample(demoExamples[currentLocale].warm); }
+function setCold() { fillExample(demoExamples[currentLocale].cold); }
 
 
 function setState(
@@ -1561,7 +1630,7 @@ function setState(
     if (state === "completed") {
 
         element.textContent =
-            "✓ COMPLETED";
+            tr("✓ COMPLETED", "✓ ВИКОНАНО");
 
         element.classList.add(
             "completed"
@@ -1570,7 +1639,7 @@ function setState(
     } else if (state === "skipped") {
 
         element.textContent =
-            "— SKIPPED";
+            tr("- SKIPPED", "- ПРОПУЩЕНО");
 
         element.classList.add(
             "skipped"
@@ -1579,7 +1648,7 @@ function setState(
     } else {
 
         element.textContent =
-            "✕ NOT CREATED";
+            tr("✕ NOT CREATED", "✕ НЕ СТВОРЕНО");
 
         element.classList.add(
             "failed"
@@ -1657,14 +1726,13 @@ function renderActions(actions) {
     if (actions.crm.lead_id) {
 
         crmDetail.textContent =
-            "Lead saved to Firestore\\n\\n" +
-            "Lead ID\\n" +
+            tr("Lead saved to Firestore\\n\\nLead ID\\n", "Заявку збережено у Firestore\\n\\nID заявки\\n") +
             actions.crm.lead_id;
 
     } else {
 
         crmDetail.textContent =
-            "No CRM lead was created.";
+            tr("No CRM lead was created.", "Запис у CRM не створено.");
     }
 
 
@@ -1692,14 +1760,14 @@ function renderActions(actions) {
     ) {
 
         let text =
-            "Follow-up scheduled";
+            tr("Follow-up scheduled", "Повторний контакт заплановано");
 
         if (
             actions.followup.delay_hours
         ) {
 
             text +=
-                " in " +
+                tr(" in ", " через ") +
                 actions.followup.delay_hours +
                 "h";
         }
@@ -1719,7 +1787,7 @@ function renderActions(actions) {
     } else {
 
         followupDetail.textContent =
-            "Skipped by LeadPilot business rules.";
+            tr("Skipped by LeadPilot business rules.", "Пропущено за бізнес-правилами LeadPilot.");
     }
 
 
@@ -1747,8 +1815,7 @@ function renderActions(actions) {
     ) {
 
         managerDetail.textContent =
-            "Manager notified\\n\\n" +
-            "Urgency: " +
+            tr("Manager notified\\n\\nUrgency: ", "Менеджера повідомлено\\n\\nТерміновість: ") +
             (
                 actions.manager.urgency
                 || "normal"
@@ -1757,7 +1824,7 @@ function renderActions(actions) {
     } else {
 
         managerDetail.textContent =
-            "Human escalation not required.";
+            tr("Human escalation not required.", "Передача менеджеру не потрібна.");
     }
 }
 
@@ -1786,7 +1853,7 @@ async function analyzeLead() {
     if (!message) {
 
         result.textContent =
-            "Enter a customer message first.";
+            tr("Enter a customer message first.", "Спочатку введіть повідомлення клієнта.");
 
         return;
     }
@@ -1795,7 +1862,7 @@ async function analyzeLead() {
     if (message.length > 2000) {
 
         result.textContent =
-            "Customer message is too long.";
+            tr("Customer message is too long.", "Повідомлення клієнта надто довге.");
 
         return;
     }
@@ -1804,7 +1871,7 @@ async function analyzeLead() {
     button.disabled = true;
 
     button.textContent =
-        "LeadPilot is working...";
+        tr("LeadPilot is working...", "LeadPilot працює...");
 
 
     document
@@ -1818,10 +1885,7 @@ async function analyzeLead() {
 
 
     result.textContent =
-        "Understanding customer intent...\\n" +
-        "Qualifying buying readiness...\\n" +
-        "Executing CRM workflow...\\n" +
-        "Applying business guardrails...";
+        tr("Understanding customer intent...\\nQualifying buying readiness...\\nExecuting CRM workflow...\\nApplying business guardrails...", "Аналіз потреби клієнта...\\nОцінка готовності до покупки...\\nВиконання дій у CRM...\\nЗастосування бізнес-правил...");
 
 
     try {
@@ -1840,7 +1904,8 @@ async function analyzeLead() {
                     body:
                         JSON.stringify(
                             {
-                                message: message
+                                message: message,
+                                locale: currentLocale
                             }
                         )
                 }
@@ -1877,7 +1942,7 @@ async function analyzeLead() {
     } catch (error) {
 
         result.textContent =
-            "LeadPilot request failed.\\n\\n" +
+            tr("LeadPilot request failed.\\n\\n", "Помилка запиту LeadPilot.\\n\\n") +
             error.message;
 
     } finally {
@@ -1886,10 +1951,12 @@ async function analyzeLead() {
             false;
 
         button.textContent =
-            "Analyze & execute workflow";
+            tr("Analyze & execute workflow", "Проаналізувати та виконати дії");
     }
 }
 
+
+setLocale(new URLSearchParams(window.location.search).get("lang") === "uk" ? "uk" : "en");
 
 </script>
 
@@ -1935,8 +2002,15 @@ async def analyze_lead(
         )
 
     try:
+        if payload.locale not in ("en", "uk"):
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported demo locale.",
+            )
+
         return await run_leadpilot(
-            message
+            message,
+            payload.locale,
         )
 
     except HTTPException:
